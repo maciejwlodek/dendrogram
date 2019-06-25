@@ -5,6 +5,7 @@
 #include <float.h>
 #include <math.h>
 #include <stdarg.h>
+#include <getopt.h>
 
 #define LEAF 1
 #define INTERNAL 2
@@ -17,6 +18,8 @@
 #define MAX_CLUSTERS 2048
 #define MAX_LINE_SIZE 2048
 
+double mh;
+
 typedef struct cluster CLUSTER;
 typedef struct list_of_datasets LIST;
 struct cluster {
@@ -25,6 +28,7 @@ struct cluster {
     double ward_height;
     int type;
     LIST* list;
+    int number;
 };
 struct list_of_datasets { //list of datasets in a cluster
     int len;
@@ -37,7 +41,7 @@ char tmp_buffer[MAX_LINE_SIZE];
 CLUSTER** clusters;
 int num_clusters;
 char lines[MAX_CLUSTERS][MAX_LINE_SIZE];
-int constrain;
+int constrain = 100; //constrain dendrogram to n characters wide, TODO: should be chosen automatically or as option
 double max_height;
 
 int debug_mode = 0;
@@ -215,6 +219,80 @@ char* append(char* buffer, char character, int start, int n_times) {
     }
     *(buffer+start-1+n_times) = 0;
 }
+//recursively print subtree rooted at given cluster, cutting off the tree above given max_height
+int write_to_dendro_file_max_height(int max_h, CLUSTER* cluster, char* filename, int line_no) {
+    debug(stdout, "printing subtree: ");
+    print_list(cluster->list);
+    debug(stdout, "checking type of current cluster\n");
+    if(cluster->type == LEAF) {
+        debug(stdout, "leaf\n");
+        sprintf(tmp_buffer, "%3d", *(cluster->list->array)); //3 -> maximum dataset number = 10^3-1
+        debug(stdout, "tmp_buffer1 = %s\n", tmp_buffer);
+        replace_nth_line_in_file(filename, tmp_buffer, line_no);
+        return line_no + 2;
+    }
+    else {
+        debug(stdout, "internal cluster\n");
+
+        int height = convert_ward_height(cluster->ward_height);
+        int lheight = convert_ward_height(cluster->left_child->ward_height);
+        int rheight = convert_ward_height(cluster->right_child->ward_height);
+
+        if(max_h < height && max_h >= lheight && cluster->left_child->type == INTERNAL) {
+            char cmd[30];
+            //output the cluster numbers of the top level clusters below max_height separately
+            sprintf(cmd, "echo \"%d\" >> top_clusters.txt", cluster->left_child->number);
+            system(cmd);
+        }
+        if(max_h < height && max_h >= rheight && cluster->right_child->type == INTERNAL) {
+            char cmd[30];
+            sprintf(cmd, "echo \"%d\" >> top_clusters.txt", cluster->right_child->number);
+            system(cmd);
+        }
+
+        debug(stdout, "height = %d, lheight = %d, rheight = %d\n", height, lheight, rheight);
+
+
+        int ave1;
+        int new_line_no = line_no;
+        if(max_h >= height || cluster->left_child->type == INTERNAL) {
+            debug(stdout, "stepping recursively to left subtree: new height = %d\n", height);
+            new_line_no = write_to_dendro_file_max_height(max_h, cluster->left_child, filename, line_no);
+            ave1 = (int) (((new_line_no + line_no)/2) - 1);
+            debug(stdout, "new line number = %d, new average = %d\n", new_line_no, ave1);
+            line_no = new_line_no;
+        }
+
+        int ave2;
+        if(max_h >= height || cluster->right_child->type == INTERNAL) {
+            debug(stdout, "stepping recursively to right subtree, new height = %d\n", height);
+            new_line_no = write_to_dendro_file_max_height(max_h, cluster->right_child, filename, line_no);
+            ave2 = (int) (((new_line_no + line_no)/2) - 1);
+            debug(stdout, "new line number = %d, new average = %d\n", new_line_no, ave2);
+        }
+
+        if(max_h >= height) {
+            get_nth_line_in_file(filename, tmp_buffer, ave1);
+            append_to_height(tmp_buffer, '-', lheight, height);
+            debug(stdout, "tmp_buffer2 = %s\n", tmp_buffer);
+            replace_nth_line_in_file(filename, tmp_buffer, ave1);
+
+            debug(stdout, "appending connector branch\n");
+            for(int i=ave1+1; i<ave2; i++) {
+                get_nth_line_in_file(filename, tmp_buffer, i);
+                append(tmp_buffer, '|', height, 1);
+                debug(stdout, "tmp_buffer3 = %s\n", tmp_buffer);
+                replace_nth_line_in_file(filename, tmp_buffer, i);
+            }
+            get_nth_line_in_file(filename, tmp_buffer, ave2);
+            append_to_height(tmp_buffer, '-', rheight, height);
+            debug(stdout, "tmp_buffer4 = %s\n", tmp_buffer);
+            replace_nth_line_in_file(filename, tmp_buffer, ave2);
+        }
+        return new_line_no;
+    }
+}
+
 //recursively print subtree rooted at given cluster
 int write_to_dendro_file(CLUSTER* cluster, char* filename, int line_no) {
     debug(stdout, "printing subtree: ");
@@ -314,7 +392,9 @@ int count_spaces(char* string) {
 LIST* get_list(char* line) {
     LIST* list = (LIST*) malloc(sizeof(LIST));
     char* datasets = last_index_of(line, "    ");
+    debug(stdout, "list of datasets = %s\n", datasets);
     list->len = count_spaces(datasets) + 1;
+    debug(stdout, "number of datasets = %d\n", list->len);
     list->array = (int*) calloc(list->len, sizeof(int));
     char* tmp = strtok(datasets, " ");
     for(int i=0; i < list->len; i++) {
@@ -327,9 +407,13 @@ LIST* get_list(char* line) {
 CLUSTER** ini_clusters() {
     CLUSTER** list_of_clusters = (CLUSTER**) calloc(num_clusters, sizeof(CLUSTER*));
     for(int i=0; i<num_clusters; i++) {
+        debug(stdout, "initializing cluster %d\n", i);
         *(list_of_clusters + i) = (CLUSTER*) malloc(sizeof(CLUSTER));
+        debug(stdout, "getting list of datasets for cluster %d\n", i);
         (*(list_of_clusters + i))->list = get_list(lines[i]);
         (*(list_of_clusters + i))->type = INTERNAL;
+        (*(list_of_clusters + i))->number = i+1; //clusters are 1-indexed in CLUSTERS.txt
+        debug(stdout, "getting ward height:\n");
         char* ward = last_index_of(lines[i], "         ");
         while(*ward == ' ') ward++;
         ward = strtok(ward, " ");
@@ -406,32 +490,52 @@ void build_tree(CLUSTER* root, int line_no) {
         }
     }
 }
+void print_help_message() {
+    printf("Usage: dendrogram [-h] [-v] [-c cutoff] CLUSTERS.txt\n");
+}
 
 int main(int argc, char* argv[]) {
+    int c;
+    while(1) {
+        static struct option long_options[] = {
+            {"cutoff", required_argument, 0, 'c'},
+            {"help", no_argument, 0, 'h'},
+            {"verbose", no_argument, 0, 'v'},
+            {0,0,0,0}
+        };
+        c = getopt_long(argc, argv, "c:hv", long_options, NULL);
+        if(c == -1) break;
+        switch(c) {
+            case 'c':
+                mh = atof(optarg);
+                if(mh <= 0) {
+                    mh = 0;
+                    fprintf(stderr, "warning: ignoring cutoff\n");
+                }
+                break;
+            case 'h':
+                print_help_message();
+                exit(0);
+                break;
+            case 'v':
+                debug_mode = 1;
+                break;
+            default:
+                exit(1);
+                break;
+        }
+    }
 
-    if(argc < 2) {
-        fprintf(stderr, "error: no CLUSTERS.txt file provided");
+    if(optind != argc-1) {
+        fprintf(stderr, "error: no CLUSTERS.txt file provided\n");
         exit(1);
-    }
-    if(strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
-        printf("Usage: dendrogram CLUSTERS.txt\n");
-        exit(0);
-    }
-    if(argc == 3) {
-        if(strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--verbose") == 0) {
-            debug_mode = 1;
-        }
-        else {
-            fprintf(stderr, "Unknown option\n");
-            exit(1);
-        }
     }
 
     debug(stdout, "%s\n", "starting...");
 
-    char* filename = argv[argc-1];
+    char* cluster_filename = argv[argc-1];
     debug(stdout, "reading cluster file...\n");
-    num_clusters = read_cluster_file(filename);
+    num_clusters = read_cluster_file(cluster_filename);
     debug(stdout, "%d clusters read\n", num_clusters);
     debug(stdout, "initializing clusters...\n");
     clusters = ini_clusters();
@@ -439,30 +543,55 @@ int main(int argc, char* argv[]) {
     CLUSTER* root = *(clusters + num_clusters - 1);
 
     max_height = root->ward_height + 1;
-    constrain = 100; //TODO: pick automatically based on num_clusters
+//    constrain = ; //TODO: pick automatically based on num_clusters
+
+    char filename[20];
+    if(mh == 0) {
+        sprintf(filename, "dendrogram.txt");
+    }
+    else {
+        sprintf(filename, "dendrogram_%.1f.txt", mh);
+    }
+
+    int mhc = convert_ward_height(mh);
 
     debug(stdout, "building tree...\n");
     build_tree(root, num_clusters-1);
-    system("touch dendrogram.txt");
 
     debug(stdout, "simple tree structure ...\n");
     print_simple_tree(root);
 
-    remove("dendrogram.txt");
-    FILE*fp = fopen("dendrogram.txt", "ab+");
-    char buffer[250] = "                                                                                                        \n"; //TODO: should be variable size based on constrain
+    remove("top_clusters.txt");
+    remove(filename);
+    FILE*fp = fopen(filename, "ab+");
+    char buffer[250] = "                                                                                                                                                                          \n"; //TODO: should be variable size based on constrain
     for(int i=0; i <= 2*num_clusters; i++) fprintf(fp, "%s", buffer);
     fclose(fp);
     debug(stdout, "writing dendrogram file...\n");
-    write_to_dendro_file(root, "dendrogram.txt", 0);
+
+    int lines_used;
+    if(mh == 0) {
+        lines_used = write_to_dendro_file(root, filename, 0);
+    }
+    else {
+        lines_used = write_to_dendro_file_max_height(mhc, root, filename, 0);
+    }
+    char cmd_head[40];
+    sprintf(cmd_head, "head -n %d %s > dendtmp.txt", lines_used, filename);
+    system(cmd_head);
+    rename("dendtmp.txt", filename);
+
     debug(stdout, "freeing memory...\n");
     fini(root);
     free(clusters);
 
     debug(stdout, "printing final tree...\n");
-    system("cat dendrogram.txt");
+    char cmd_cat[40];
+    sprintf(cmd_cat, "cat %s", filename);
+    system(cmd_cat);
 
     debug(stdout, "done!\n");
 
 }
+
 
