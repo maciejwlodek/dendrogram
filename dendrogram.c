@@ -37,6 +37,8 @@ struct list_of_datasets { //list of datasets in a cluster
 
 char tmp_buffer[MAX_LINE_SIZE];
 
+int old_format = 0;
+
 //CLUSTER* root;
 CLUSTER** clusters;
 int num_clusters;
@@ -350,6 +352,13 @@ int write_to_dendro_file(CLUSTER* cluster, char* filename, int line_no) {
 }
 
 int read_cluster_file(char* filename) {
+    char buffer[150];
+    get_nth_line_in_file(filename, buffer, 1);
+    if(strstr(buffer, "Furthest") == NULL) {
+        debug(stdout, "clusters file has old formatting\n");
+        old_format = 1;
+    }
+
     int len = strlen(filename);
     char cmd[len+30];
     sprintf(cmd, "tail -n +5 %s > tmpdendro.txt", filename); //delete the file header
@@ -391,7 +400,13 @@ int count_spaces(char* string) {
 //get list of datasets from a CLUSTERS.txt format line
 LIST* get_list(char* line) {
     LIST* list = (LIST*) malloc(sizeof(LIST));
-    char* datasets = last_index_of(line, "    ");
+    char* datasets;
+    if(old_format == 1) {
+        datasets = last_index_of(line, "      ");
+    }
+    else {
+        datasets = last_index_of(line, "    ");
+    }
     debug(stdout, "list of datasets = %s\n", datasets);
     list->len = count_spaces(datasets) + 1;
     debug(stdout, "number of datasets = %d\n", list->len);
@@ -492,6 +507,7 @@ void build_tree(CLUSTER* root, int line_no) {
 }
 void print_help_message() {
     printf("Usage: dendrogram [-h] [-v] [-c cutoff] CLUSTERS.txt\n");
+    printf("cutoff = float (ward height at which to cut the tree off)\n");
 }
 
 int main(int argc, char* argv[]) {
